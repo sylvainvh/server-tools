@@ -150,10 +150,18 @@ class BaseException(models.AbstractModel):
             ...
             self._check_exception
         """
-        exception_ids = self.detect_exceptions()
-        if exception_ids:
-            exceptions = self.env['exception.rule'].browse(exception_ids)
-            raise ValidationError('\n'.join(exceptions.mapped('name')))
+        exceptions_list = self.detect_exceptions()
+        if exceptions_list:
+            exceptions_dict = dict(exceptions_list)
+            exceptions = \
+                self.env['exception.rule'].browse(exceptions_dict.keys())
+
+            message = '\n'.join(
+                ['* %s' % exceptions_dict.get(exception.id)
+                 for exception in exceptions]
+            )
+
+            raise ValidationError(message)
 
     @api.multi
     def test_exceptions(self):
@@ -178,15 +186,16 @@ class BaseException(models.AbstractModel):
         sub_exceptions = all_exceptions.filtered(
             lambda ex: ex.model != self._name)
 
-        all_exception_ids = []
+        all_exceptions = []
         for obj in self:
             if obj.ignore_exception:
                 continue
-            exception_ids = obj._detect_exceptions(
-                model_exceptions, sub_exceptions)
+            exceptions = \
+                obj._detect_exceptions(model_exceptions, sub_exceptions)
+            exception_ids = [x[0] for x in exceptions]
             obj.exception_ids = [(6, 0, exception_ids)]
-            all_exception_ids += exception_ids
-        return all_exception_ids
+            all_exceptions += exceptions
+        return all_exceptions
 
     @api.model
     def _exception_rule_eval_context(self, obj_name, rec):
@@ -215,7 +224,7 @@ class BaseException(models.AbstractModel):
             raise UserError(
                 _('Error when evaluating the exception.rule '
                   'rule:\n %s \n(%s)') % (rule.name, e))
-        return space.get('failed', False)
+        return space.get('failed', False), space.get('message')
 
     @api.multi
     def _detect_exceptions(self, model_exceptions,
@@ -224,8 +233,9 @@ class BaseException(models.AbstractModel):
         exception_ids = []
         next_state_rule = False
         for rule in model_exceptions:
-            if self._rule_eval(rule, self.rule_group, self):
-                exception_ids.append(rule.id)
+            result, message = self._rule_eval(rule, self.rule_group, self)
+            if result:
+                exception_ids.append((rule.id, message))
                 if rule.next_state:
                     if not next_state_rule or\
                        rule.sequence < next_state_rule.sequence:
@@ -239,8 +249,10 @@ class BaseException(models.AbstractModel):
                         # (ex sale order line if obj is sale order)
                         continue
                     group_line = self.rule_group + '_line'
-                    if self._rule_eval(rule, group_line, obj_line):
-                        exception_ids.append(rule.id)
+                    result, message = \
+                        self._rule_eval(rule, group_line, obj_line)
+                    if result:
+                        exception_ids.append((rule.id, message))
         # set object to next state
         if next_state_rule:
             self.state = next_state_rule.next_state
